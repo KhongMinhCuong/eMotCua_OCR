@@ -21,6 +21,19 @@ if ! curl -fsS "$AI_SERVER_URL/health" >/dev/null; then
     model_args=(-hf "$LLAMA_MODEL")
   fi
 
+  # Trong distrobox (Ubuntu container trên host Fedora/Nobara), ICD Vulkan
+  # của NVIDIA trỏ tới /usr/lib64/libGLX_nvidia.so.0 (quy ước Fedora) nhưng
+  # container không có đường dẫn đó -> Vulkan chỉ thấy GPU onboard (AMD/Intel).
+  # Ghi ICD với đường dẫn đúng cho Ubuntu rồi trỏ VK_ICD_FILENAMES vào đó.
+  nvidia_lib="/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0"
+  if [[ -f "$nvidia_lib" && -z "${VK_ICD_FILENAMES:-}" ]]; then
+    icd_json="$RUN_DIR/nvidia_icd.json"
+    cat >"$icd_json" <<EOF
+{"file_format_version":"1.0.1","ICD":{"library_path":"$nvidia_lib","api_version":"1.4.329"}}
+EOF
+    export VK_ICD_FILENAMES="$icd_json"
+  fi
+
   "$LLAMA_BIN" serve "${model_args[@]}" --port 8080 --ctx-size "$LLAMA_CTX_SIZE" -ngl "$LLAMA_GPU_LAYERS" \
     >"$RUN_DIR/llama.log" 2>&1 &
   echo "$!" >"$RUN_DIR/llama.pid"

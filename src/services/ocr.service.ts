@@ -1,5 +1,6 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import readline from 'readline';
+import os from 'os';
 import path from 'path';
 
 interface PythonOcrResult {
@@ -14,35 +15,42 @@ interface PythonOcrResult {
   };
 }
 
-// Model load (~9s) happens once per process, not per request: keep one Python worker
-// alive for the life of the Node process and feed it file paths over stdin.
-let worker: ChildProcessWithoutNullStreams | null = null;
-let ready: Promise<void> | null = null;
-let queue: Promise<unknown> = Promise.resolve();
+// Pool size: leave 20% of cores free so OCR load can't starve the rest of the
+// machine (AI extract, OS). Each worker gets OMP_NUM_THREADS capped at the pool
+// size with OMP_DYNAMIC=TRUE, so a lone request can use most of the reserved
+// cores while OpenMP itself scales worker threads down as others get busy.
+const POOL_SIZE = Math.max(1, Math.floor(os.cpus().length * 0.8));
 
-function startWorker(): Promise<void> {
+interface Worker {
+  child: ChildProcessWithoutNullStreams | null;
+  ready: Promise<void> | null;
+  pending: Array<(line: string) => void>;
+  inFlight: number;
+}
+
+const pool: Worker[] = Array.from({ length: POOL_SIZE }, () => ({ child: null, ready: null, pending: [] as Array<(line: string) => void>, inFlight: 0 }));
+
+function startWorker(w: Worker): Promise<void> {
   const scriptPath = path.resolve(__dirname, '../../python/ocr.py');
   // OMP_WAIT_POLICY=PASSIVE: PaddlePaddle's OpenMP/MKL threads busy-spin on CPU
   // while idle by default, starving llama.cpp's CPU-side work during AI extract.
   const child = spawn('python3', [scriptPath, '--worker'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, OMP_WAIT_POLICY: 'PASSIVE' },
+    env: { ...process.env, OMP_WAIT_POLICY: 'PASSIVE', OMP_NUM_THREADS: String(POOL_SIZE), OMP_DYNAMIC: 'TRUE' },
   });
-  worker = child;
+  w.child = child;
 
   const lines = readline.createInterface({ input: child.stdout });
-  const pending: Array<(line: string) => void> = [];
-  (child as any)._pending = pending;
-  lines.on('line', (line) => pending.shift()?.(line));
+  lines.on('line', (line) => w.pending.shift()?.(line));
 
   child.on('exit', () => {
-    worker = null;
-    ready = null;
-    pending.splice(0).forEach((resolve) => resolve(JSON.stringify({ error: 'OCR worker exited' })));
+    w.child = null;
+    w.ready = null;
+    w.pending.splice(0).forEach((resolve) => resolve(JSON.stringify({ error: 'OCR worker exited' })));
   });
 
   return new Promise((resolve, reject) => {
-    pending.push((line) => {
+    w.pending.push((line) => {
       try {
         JSON.parse(line).ready ? resolve() : reject(new Error('OCR worker failed to start'));
       } catch {
@@ -52,15 +60,15 @@ function startWorker(): Promise<void> {
   });
 }
 
-function ensureWorker(): Promise<void> {
-  if (!worker || !ready) ready = startWorker();
-  return ready;
+function ensureWorker(w: Worker): Promise<void> {
+  if (!w.child || !w.ready) w.ready = startWorker(w);
+  return w.ready;
 }
 
-function requestOcr(filePath: string, debug = false): Promise<PythonOcrResult> {
-  const child = worker as ChildProcessWithoutNullStreams;
+function requestOcr(w: Worker, filePath: string, debug = false): Promise<PythonOcrResult> {
+  const child = w.child as ChildProcessWithoutNullStreams;
   return new Promise((resolve, reject) => {
-    (child as any)._pending.push((line: string) => {
+    w.pending.push((line: string) => {
       try {
         const parsed = JSON.parse(line);
         if (parsed.error) reject(new Error(`VietOCR failed: ${parsed.error}`));
@@ -74,10 +82,19 @@ function requestOcr(filePath: string, debug = false): Promise<PythonOcrResult> {
   });
 }
 
-export function ocrDocument(filePath: string, debug = false): Promise<PythonOcrResult> {
-  // Serialize requests: the worker reads one line in, writes one line out — no
-  // interleaving multiple files through the same stdin/stdout pipe at once.
-  const result = queue.then(() => ensureWorker()).then(() => requestOcr(filePath, debug));
-  queue = result.catch(() => undefined);
-  return result;
+function pickLeastBusy(): Worker {
+  return pool.reduce((best, w) => (w.inFlight < best.inFlight ? w : best));
+}
+
+export async function ocrDocument(filePath: string, debug = false): Promise<PythonOcrResult> {
+  // Each worker still serializes its own stdin/stdout (1 line in, 1 line out),
+  // but requests fan out across the pool instead of a single global queue.
+  const w = pickLeastBusy();
+  w.inFlight++;
+  try {
+    await ensureWorker(w);
+    return await requestOcr(w, filePath, debug);
+  } finally {
+    w.inFlight--;
+  }
 }
