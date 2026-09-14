@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.run/
+uploads/*
+!uploads/.gitkeep
+results/
+*.log

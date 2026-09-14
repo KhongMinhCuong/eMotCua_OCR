@@ -1,0 +1,27 @@
+{
+  "name": "ocr-sohong",
+  "version": "1.0.0",
+  "description": "OCR service for Vietnamese property documents",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["ocr", "vietocr", "vietnamese", "real-estate"],
+  "author": "Cuong",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^4.21.2",
+    "express-async-errors": "^3.1.1",
+    "multer": "^1.4.5-lts.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.11",
+    "@types/node": "^22.10.1",
+    "tsx": "^4.20.2",
+    "typescript": "^5.7.2"
+  }
+}
