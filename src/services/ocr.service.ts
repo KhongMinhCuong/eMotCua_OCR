@@ -3,9 +3,19 @@ import readline from 'readline';
 import os from 'os';
 import path from 'path';
 
+export interface MrzResult {
+  raw: string;
+  soCCCD: string;
+  ngaySinh: string;
+  gioiTinh: string;
+  ngayHetHan: string;
+  hoTen: string;
+}
+
 interface PythonOcrResult {
   rawText: string;
   pageCount: number;
+  mrz?: MrzResult | null;
   debug?: {
     loadPages_s: number;
     pages: Array<{ boxes: number; rows: number; detect_s: number; recognize_s: number }>;

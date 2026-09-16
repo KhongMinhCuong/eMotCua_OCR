@@ -5,11 +5,19 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_URL="${API_URL:-http://127.0.0.1:3000/api/extract}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/results}"
 DEBUG="${DEBUG:-0}"
+DOC_TYPE="${DOC_TYPE:-gcn}"
 
 [[ $# -gt 0 ]] || {
-  echo "Dùng: $0 <file.pdf|image> [file2 ...]" >&2
+  echo "Dùng: $0 [-t cccd|gcn] <file.pdf|image> [file2 ...]" >&2
+  echo "  (hoặc: DOC_TYPE=cccd $0 <file...>)" >&2
   exit 1
 }
+
+if [[ "$1" == "-t" ]]; then
+  DOC_TYPE="$2"
+  shift 2
+fi
+[[ "$DOC_TYPE" == "cccd" || "$DOC_TYPE" == "gcn" ]] || { echo "docType không hợp lệ: $DOC_TYPE (cccd|gcn)" >&2; exit 1; }
 
 if ! curl -fsS "${API_URL%/api/extract}/health" >/dev/null; then
   "$ROOT_DIR/scripts/start-server.sh"
@@ -25,6 +33,7 @@ for input in "$@"; do
   form_args+=(-F "files=@$input")
 done
 [[ ${#form_args[@]} -gt 0 ]] || { echo "Không có file hợp lệ nào." >&2; exit 1; }
+form_args+=(-F "docType=$DOC_TYPE")
 
 stem="$(basename "${1%.*}")"
 output="$OUTPUT_DIR/$stem.json"
@@ -38,7 +47,7 @@ url="$API_URL"
 [[ "$DEBUG" == "1" ]] && url="${url}?debug=1"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📄 Trích xuất: $*"
+echo "📄 Trích xuất ($DOC_TYPE): $*"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 t_start=$(date +%s%N)

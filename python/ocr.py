@@ -1,5 +1,6 @@
 import contextlib
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -8,10 +9,69 @@ import cv2
 import fitz
 import numpy as np
 import psutil
+import pytesseract
 from paddleocr import TextDetection
 from PIL import Image
 from vietocr.tool.config import Cfg
 from vietocr.tool.predictor import Predictor
+
+# CCCD (Vietnamese ID card) back side has a 3-line TD1 MRZ block that VietOCR
+# (trained for Vietnamese prose, not monospace OCR-B digits/"<") reads poorly.
+# Fallback: try the MRZ-shaped rows VietOCR already produced; if none look
+# right, re-crop the bottom strip of the source image and re-OCR it with
+# tesseract (better suited to this fixed monospace font).
+MRZ_LINE_RE = re.compile(r'^[A-Z0-9<]{25,40}$')
+MRZ_LINE2_RE = re.compile(r'(\d{6})\d([MF])(\d{6})\d?.{0,4}VNM')
+
+# ponytail: regex-only, no ICAO check-digit validation, and misaligns on very
+# noisy crops (stray duplicated digits shift the day/sex/expiry split). Good
+# enough as a cross-check hint for the LLM prompt; add check-digit validation
+# if wrong-but-plausible dates start showing up in practice.
+def parse_mrz(lines: list[str]) -> dict | None:
+    candidates = [l.strip().upper().replace(' ', '') for l in lines if l.strip()]
+    candidates = [l for l in candidates if MRZ_LINE_RE.match(l)]
+    if len(candidates) < 3:
+        return None
+    l1, l2, l3 = (c.ljust(30, '<')[:30] for c in candidates[-3:])
+    # OCR confuses O/0 in the digit run; safe to fold since real line2 has no "O".
+    # search (not match): stray/duplicated junk chars can shift the real fields.
+    m = MRZ_LINE2_RE.search(l2.replace('O', '0'))
+    if not m:
+        return None
+    dob, sex, exp = m.groups()
+
+    def fmt(yymmdd: str, past_pivot: int) -> str:
+        yy, mm, dd = yymmdd[0:2], yymmdd[2:4], yymmdd[4:6]
+        century = '19' if int(yy) > past_pivot else '20'
+        return f'{dd}/{mm}/{century}{yy}'
+
+    # TD1 line1 often has the real ID duplicated/padded with extra leading digits
+    # (doc number, check digits) from OCR noise; the LAST 9-12 digit run lines up
+    # with the true 12-digit ID far more often than the first.
+    id_matches = list(re.finditer(r'\d{9,12}', l1[5:]))
+    return {
+        'raw': f'{l1}\n{l2}\n{l3}',
+        'soCCCD': id_matches[-1].group(0)[-12:] if id_matches else '',
+        'ngaySinh': fmt(dob, past_pivot=30),
+        'gioiTinh': {'M': 'Nam', 'F': 'Nữ'}.get(sex, ''),
+        'ngayHetHan': fmt(exp, past_pivot=0),
+        'hoTen': l3.replace('<<', ' ').replace('<', ' ').strip(),
+    }
+
+def mrz_from_image(image: np.ndarray) -> dict | None:
+    h, w = image.shape[:2]
+    if not (1.35 <= w / h <= 1.85):
+        return None  # not ID-card shaped; skip the extra tesseract pass
+    crop = image[int(h * 0.68):, :]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    # Fixed threshold beats Otsu here: the card's watermark pattern behind the
+    # MRZ confuses Otsu's automatic split; MRZ ink is reliably darker than ~110.
+    _, thresh = cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY)
+    text = pytesseract.image_to_string(
+        thresh, config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+    )
+    return parse_mrz(text.splitlines())
 
 _this_proc = psutil.Process()
 
@@ -102,6 +162,10 @@ def process_file(file_path: str, detector: TextDetection, predictor: Predictor, 
 
     text = '\n\n'.join(r['text'] for r in results)
     out = {'rawText': text, 'pageCount': len(pages)}
+
+    # Only single-image (non-PDF) sources are ID-card photos in practice.
+    if len(pages) == 1 and Path(file_path).suffix.lower() != '.pdf':
+        out['mrz'] = parse_mrz(text.split('\n')) or mrz_from_image(pages[0])
 
     if debug:
         out['debug'] = {

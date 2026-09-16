@@ -26,6 +26,7 @@ extractRouter.post('/', upload.array('files', 5), async (request, response) => {
     return errorResponse(response, 400, 'Cần gửi ít nhất một file PDF hoặc ảnh trong field "files".');
   }
 
+  const docType = request.body.docType === 'cccd' ? 'cccd' : 'gcn'; // người dùng chọn trước, không tự đoán
   const debug = process.env.DEBUG === '1' || request.query.debug === '1';
   const totalStart = Date.now();
   const memStart = process.memoryUsage();
@@ -33,6 +34,7 @@ extractRouter.post('/', upload.array('files', 5), async (request, response) => {
   const filesOut: any[] = [];
   const ocrDebugs: any[] = [];
   const fixedTexts: string[] = [];
+  let mrz = null as import('../services/ocr.service').MrzResult | null;
 
   try {
     for (const file of files) {
@@ -47,6 +49,7 @@ extractRouter.post('/', upload.array('files', 5), async (request, response) => {
         cleanupFile(filePath);
       }
       ocrDebugs.push(ocrResult.debug ?? null);
+      mrz = mrz ?? ocrResult.mrz ?? null; // usually only the back-of-card image has one
 
       const fixedText = fixLayout(ocrResult.rawText);
       fixedTexts.push(fixedText);
@@ -65,7 +68,7 @@ extractRouter.post('/', upload.array('files', 5), async (request, response) => {
       ? fixedTexts[0]
       : fixedTexts.map((t, i) => `--- Ảnh ${i + 1} ---\n${t}`).join('\n\n');
 
-    const aiResult = await extractFields(mergedText, debug);
+    const aiResult = await extractFields(mergedText, docType, debug, docType === 'cccd' ? mrz : null);
     const fields = 'fields' in aiResult ? aiResult.fields : aiResult;
     const aiDebug = 'debug' in aiResult ? aiResult.debug : undefined;
 

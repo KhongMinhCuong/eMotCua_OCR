@@ -1,4 +1,4 @@
-import { ExtractDebug, ExtractedFields } from '../services/ai.service';
+import { CccdFields, ExtractDebug, ExtractedFields } from '../services/ai.service';
 
 // Types for OCR processing
 export interface OcrResult {
@@ -37,7 +37,7 @@ export interface ExtractDebugInfo {
 }
 
 export interface ExtractResult extends OcrResult {
-  fields: ExtractedFields;
+  fields: ExtractedFields | CccdFields;
   debug?: ExtractDebugInfo;
 }
 
